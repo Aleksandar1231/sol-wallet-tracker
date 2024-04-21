@@ -20,9 +20,10 @@ const client = new Client({
 });
 client.login(process.env.DISCORD_BOT_TOKEN);
 
-const addresses_map = new Map();
+let ADDRESSES = [];
+let CHANNEL_ID = "";
 
-async function addAddress(address, channel) {
+async function addAddress(address) {
   const api = `https://api.helius.xyz/v0/webhooks/${process.env.HELIUS_WEBHOOK_ID}?api-key=${process.env.HELIUS_API_KEY}`;
   const response = await fetch(api, {
     method: "PUT",
@@ -30,7 +31,7 @@ async function addAddress(address, channel) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      accountAddresses: [...addresses_map.keys(), address],
+      accountAddresses: [...ADDRESSES, address],
       webhookURL: process.env.WEBHOOK_URL,
       transactionTypes: ["SWAP"],
       webhookType: "enhanced",
@@ -41,23 +42,23 @@ async function addAddress(address, channel) {
       `Failed to add address: ${response.status} ${response.statusText}`
     );
   }
-  const channels = addresses_map.get(address) || [];
-  channels.push(channel);
-  addresses_map.set(address, channels);
+  ADDRESSES.push(address);
   console.log(`Added address: ${address}`);
 }
 
 async function removeAddress(address) {
   const api = `https://api.helius.xyz/v0/webhooks/${process.env.HELIUS_WEBHOOK_ID}?api-key=${process.env.HELIUS_API_KEY}`;
+  const newAddresses = ADDRESSES.filter((addr) => addr !== address);
+  if (newAddresses.length === 0) {
+    newAddresses.push("sample");
+  }
   const response = await fetch(api, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      accountAddresses: [...addresses_map.keys()].filter(
-        (addr) => addr !== address
-      ),
+      accountAddresses: newAddresses,
       webhookURL: process.env.WEBHOOK_URL,
       transactionTypes: ["SWAP"],
       webhookType: "enhanced",
@@ -68,7 +69,7 @@ async function removeAddress(address) {
       `Failed to remove address: ${response.status} ${response.statusText}`
     );
   }
-  addresses_map.delete(address);
+  ADDRESSES = ADDRESSES.filter((addr) => addr !== address);
   console.log(`Removed address: ${address}`);
 }
 
@@ -85,16 +86,12 @@ async function listAddresses() {
   // }
   // const json = await response.json();
   // return json["accountAddresses"];
-  return [...addresses_map.keys()];
+  return ADDRESSES;
 }
 
-const sendDiscordNotification = async (
-  address,
-  description,
-  transactionSignature
-) => {
+const sendDiscordNotification = async (description, transactionSignature) => {
   await sendDiscordWebhook(description, transactionSignature);
-  await sendDiscordMessage(address, description, transactionSignature);
+  await sendDiscordMessage(description, transactionSignature);
 };
 
 const sendDiscordWebhook = async (description, transactionSignature) => {
@@ -129,41 +126,37 @@ const sendDiscordWebhook = async (description, transactionSignature) => {
   }
 };
 
-const sendDiscordMessage = async (
-  address,
-  description,
-  transactionSignature
-) => {
-  const channels = addresses_map.get(address) || [];
-  if (channels.length === 0) return console.error("Channel not found!");
+const sendDiscordMessage = async (description, transactionSignature) => {
+  const channel = await client.channels.fetch(CHANNEL_ID);
+  if (!channel) return console.error("Channel not found!");
+  //if (channels.length === 0) return console.error("Channel not found!");
 
-  channels.forEach(async (channel) => {
-    const message = {
-      content: "Transaction Alert!",
-      embeds: [
-        {
-          title: "Swap Alert",
-          color: 3066993,
-          description: description,
-          fields: [
-            {
-              name: "Tx:",
-              value: `\`${transactionSignature}\``,
-              inline: false,
-            },
-          ],
-          footer: { text: "Powered by @code_to_crypto" },
-          timestamp: new Date(),
-        },
-      ],
-    };
+  // channels.forEach(async (channel) => {
+  const message = {
+    embeds: [
+      {
+        title: "Swap Alert",
+        color: 3066993,
+        description: description,
+        fields: [
+          {
+            name: "Tx:",
+            value: `\`${transactionSignature}\``,
+            inline: false,
+          },
+        ],
+        footer: { text: "Powered by @code_to_crypto" },
+        timestamp: new Date(),
+      },
+    ],
+  };
 
-    try {
-      await channel.send(message);
-    } catch (error) {
-      console.error("Failed to send Discord notification:", error);
-    }
-  });
+  try {
+    await channel.send(message);
+  } catch (error) {
+    console.error("Failed to send Discord notification:", error);
+  }
+  // });
 };
 
 function handleWebhookMessage(messageObj) {
@@ -173,15 +166,14 @@ function handleWebhookMessage(messageObj) {
   }
   messageObj.forEach((message) => {
     console.log("Processing message:", message);
-    const address = message.feePayer;
-    // if (message.type !== "SWAP" || message.transactionError !== null) {
-    //   console.error("Not a swap transaction or transaction error");
-    //   return;
-    // }
+    if (message.type !== "SWAP" || message.transactionError !== null) {
+      console.error("Not a swap transaction or transaction error");
+      return;
+    }
     if (message.description) {
       const description = message.description;
       console.log("Sending Discord notification:", description);
-      sendDiscordNotification(address, description, message.signature);
+      sendDiscordNotification(description, message.signature);
       return;
     }
     if (message.events.swap) {
@@ -214,7 +206,7 @@ function handleWebhookMessage(messageObj) {
         }
 
         console.log("Sending Discord notification:", description);
-        sendDiscordNotification(address, description, message.signature);
+        sendDiscordNotification(description, message.signature);
         return;
       }
     }
@@ -225,7 +217,7 @@ function handleWebhookMessage(messageObj) {
         destinationTransfer = tokenTransfers[1];
         const description = `${sourceTransfer.fromUserAccount} swapped ${sourceTransfer.tokenAmount} of \`${sourceTransfer.mint}\` for ${destinationTransfer.tokenAmount} of \`${destinationTransfer.mint}\``;
         console.log("Sending Discord notification:", description);
-        sendDiscordNotification(address, description, message.signature);
+        sendDiscordNotification(description, message.signature);
         return;
       }
     }
@@ -247,6 +239,7 @@ app.listen(PORT, () => {
 client.on("messageCreate", async (message) => {
   if (!message.content.startsWith("!") || message.author.bot) return;
   console.log("Received command:", message.content);
+  CHANNEL_ID = message.channel.id;
   const args = message.content.slice(1).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
@@ -284,7 +277,7 @@ client.on("messageCreate", async (message) => {
         );
         return;
       }
-      if (!addresses_map.has(args[0])) {
+      if (!ADDRESSES.includes(args[0])) {
         message.channel.send(
           createEmbed("Error", `Address \`${args[0]}\` not found!`, 0xff0000)
         );

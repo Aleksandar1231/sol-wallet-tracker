@@ -1,12 +1,25 @@
 import express from "express";
 import axios from "axios";
 import dotenv from "dotenv";
+import mysql from "mysql";
 import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { Client, GatewayIntentBits } from "discord.js";
 
 dotenv.config();
 const app = express();
 const PORT = 8080;
+
+const dbConnection = mysql.createConnection({
+  host: "mysql.db.bot-hosting.net",
+  user: process.env.MYSQL_USER,
+  password: process.env.MYSQL_PASSWORD,
+  database: process.env.MYSQL_DATABASE,
+});
+
+dbConnection.connect((err) => {
+  if (err) throw err;
+  console.log("Connected to MySQL!");
+});
 
 // Middleware to parse JSON bodies
 app.use(express.json());
@@ -20,10 +33,19 @@ const client = new Client({
 });
 client.login(process.env.DISCORD_BOT_TOKEN);
 
-let ADDRESSES = [];
-let CHANNEL_ID = "";
-
-async function addAddress(address) {
+async function addAddress(address, channelId) {
+  new Promise((resolve, reject) => {
+    const query = `INSERT INTO subscriptions (wallet_address, channel_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE id=id`;
+    dbConnection.query(query, [address, channelId], (error, results) => {
+      if (error) {
+        return reject(error);
+      }
+      console.log(`Added address: ${address} for channel ID: ${channelId}`);
+      resolve();
+    });
+  });
+  const addresses = await listAllAddresses();
+  console.log("Addresses:", addresses);
   const api = `https://api.helius.xyz/v0/webhooks/${process.env.HELIUS_WEBHOOK_ID}?api-key=${process.env.HELIUS_API_KEY}`;
   const response = await fetch(api, {
     method: "PUT",
@@ -31,67 +53,121 @@ async function addAddress(address) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      accountAddresses: [...ADDRESSES, address],
+      accountAddresses: addresses,
       webhookURL: process.env.WEBHOOK_URL,
       transactionTypes: ["SWAP"],
       webhookType: "enhanced",
     }),
   });
   if (!response.ok) {
+    new Promise((resolve, reject) => {
+      const query = `DELETE FROM subscriptions WHERE wallet_address = ? AND channel_id = ?`;
+      dbConnection.query(query, [address, channelId], (error, results) => {
+        if (error) {
+          return reject(error);
+        }
+        console.log(`Removed address: ${address} for channel ID: ${channelId}`);
+        resolve();
+      });
+    });
     throw new Error(
       `Failed to add address: ${response.status} ${response.statusText}`
     );
   }
-  ADDRESSES.push(address);
-  console.log(`Added address: ${address}`);
 }
 
-async function removeAddress(address) {
+async function removeAddress(address, channelId) {
+  new Promise((resolve, reject) => {
+    const query = `DELETE FROM subscriptions WHERE wallet_address = ? AND channel_id = ?`;
+    dbConnection.query(query, [address, channelId], (error, results) => {
+      if (error) {
+        return reject(error);
+      }
+      console.log(`Removed address: ${address} for channel ID: ${channelId}`);
+      resolve();
+    });
+  });
   const api = `https://api.helius.xyz/v0/webhooks/${process.env.HELIUS_WEBHOOK_ID}?api-key=${process.env.HELIUS_API_KEY}`;
-  const newAddresses = ADDRESSES.filter((addr) => addr !== address);
-  if (newAddresses.length === 0) {
-    newAddresses.push("sample");
+  const addresses = await listAllAddresses();
+  if (!addresses || addresses.length === 0) {
+    addresses.push("sample");
   }
+  console.log("Addresses:", addresses);
   const response = await fetch(api, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      accountAddresses: newAddresses,
+      accountAddresses: addresses,
       webhookURL: process.env.WEBHOOK_URL,
       transactionTypes: ["SWAP"],
       webhookType: "enhanced",
     }),
   });
   if (!response.ok) {
+    new Promise((resolve, reject) => {
+      const query = `INSERT INTO subscriptions (wallet_address, channel_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE id=id`;
+      dbConnection.query(query, [address, channelId], (error, results) => {
+        if (error) {
+          return reject(error);
+        }
+        console.log(`Added address: ${address} for channel ID: ${channelId}`);
+        resolve();
+      });
+    });
     throw new Error(
       `Failed to remove address: ${response.status} ${response.statusText}`
     );
   }
-  ADDRESSES = ADDRESSES.filter((addr) => addr !== address);
-  console.log(`Removed address: ${address}`);
 }
 
-async function listAddresses() {
-  // const api = `https://api.helius.xyz/v0/webhooks/${process.env.HELIUS_WEBHOOK_ID}?api-key=${process.env.HELIUS_API_KEY}`;
-  // const response = await fetch(api, {
-  //   method: "GET",
-  //   headers: {
-  //     "Content-Type": "application/json",
-  //   },
-  // });
-  // if (!response.ok) {
-  //   throw new Error(`Failed to add address: ${response.statusText}`);
-  // }
-  // const json = await response.json();
-  // return json["accountAddresses"];
-  return ADDRESSES;
+async function listAllAddresses() {
+  return new Promise((resolve, reject) => {
+    const query = `SELECT wallet_address FROM subscriptions`;
+    dbConnection.query(query, (error, results) => {
+      if (error) {
+        return reject(error);
+      }
+      const addresses = results.map((row) => row.wallet_address);
+      resolve(addresses);
+    });
+  });
 }
 
-const sendDiscordNotification = async (description, transactionSignature) => {
+async function listAddresses(channelId) {
+  return new Promise((resolve, reject) => {
+    const query = `SELECT wallet_address FROM subscriptions WHERE channel_id = ?`;
+    dbConnection.query(query, [channelId], (error, results) => {
+      if (error) {
+        return reject(error);
+      }
+      const addresses = results.map((row) => row.wallet_address);
+      resolve(addresses);
+    });
+  });
+}
+
+async function listChannels(walletAddress) {
+  return new Promise((resolve, reject) => {
+    const query = `SELECT channel_id FROM subscriptions WHERE wallet_address = ?`;
+    dbConnection.query(query, [walletAddress], (error, results) => {
+      if (error) {
+        return reject(error);
+      }
+      const channels = results.map((row) => row.channel_id);
+      resolve(channels);
+    });
+  });
+}
+
+const sendDiscordNotification = async (
+  walletAddress,
+  description,
+  transactionSignature
+) => {
   await sendDiscordWebhook(description, transactionSignature);
-  await sendDiscordMessage(description, transactionSignature);
+  await sendDiscordMessage(walletAddress, description, transactionSignature);
 };
 
 const sendDiscordWebhook = async (description, transactionSignature) => {
@@ -126,12 +202,15 @@ const sendDiscordWebhook = async (description, transactionSignature) => {
   }
 };
 
-const sendDiscordMessage = async (description, transactionSignature) => {
-  const channel = await client.channels.fetch(CHANNEL_ID);
-  if (!channel) return console.error("Channel not found!");
-  //if (channels.length === 0) return console.error("Channel not found!");
+const sendDiscordMessage = async (
+  walletAddress,
+  description,
+  transactionSignature
+) => {
+  const channels = await listChannels(walletAddress);
+  if (!channels || channels.length === 0)
+    return console.error("Channel not found!");
 
-  // channels.forEach(async (channel) => {
   const message = {
     embeds: [
       {
@@ -151,12 +230,14 @@ const sendDiscordMessage = async (description, transactionSignature) => {
     ],
   };
 
-  try {
-    await channel.send(message);
-  } catch (error) {
-    console.error("Failed to send Discord notification:", error);
-  }
-  // });
+  channels.forEach(async (channelId) => {
+    try {
+      const channel = await client.channels.fetch(channelId);
+      await channel.send(message);
+    } catch (error) {
+      console.error("Failed to send Discord notification:", error);
+    }
+  });
 };
 
 function handleWebhookMessage(messageObj) {
@@ -165,6 +246,11 @@ function handleWebhookMessage(messageObj) {
     return;
   }
   messageObj.forEach((message) => {
+    const wallet = message.feePayer;
+    if (!wallet) {
+      console.error("No wallet found in the transaction");
+      return;
+    }
     console.log("Processing message:", message);
     if (message.type !== "SWAP" || message.transactionError !== null) {
       console.error("Not a swap transaction or transaction error");
@@ -173,7 +259,7 @@ function handleWebhookMessage(messageObj) {
     if (message.description) {
       const description = message.description;
       console.log("Sending Discord notification:", description);
-      sendDiscordNotification(description, message.signature);
+      sendDiscordNotification(wallet, description, message.signature);
       return;
     }
     if (message.events.swap) {
@@ -206,7 +292,7 @@ function handleWebhookMessage(messageObj) {
         }
 
         console.log("Sending Discord notification:", description);
-        sendDiscordNotification(description, message.signature);
+        sendDiscordNotification(wallet, description, message.signature);
         return;
       }
     }
@@ -217,7 +303,7 @@ function handleWebhookMessage(messageObj) {
         destinationTransfer = tokenTransfers[1];
         const description = `${sourceTransfer.fromUserAccount} swapped ${sourceTransfer.tokenAmount} of \`${sourceTransfer.mint}\` for ${destinationTransfer.tokenAmount} of \`${destinationTransfer.mint}\``;
         console.log("Sending Discord notification:", description);
-        sendDiscordNotification(description, message.signature);
+        sendDiscordNotification(wallet, description, message.signature);
         return;
       }
     }
@@ -239,7 +325,7 @@ app.listen(PORT, () => {
 client.on("messageCreate", async (message) => {
   if (!message.content.startsWith("!") || message.author.bot) return;
   console.log("Received command:", message.content);
-  CHANNEL_ID = message.channel.id;
+  const channel = message.channel.id;
   const args = message.content.slice(1).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
@@ -266,7 +352,7 @@ client.on("messageCreate", async (message) => {
         );
         return;
       }
-      await addAddress(args[0], message);
+      await addAddress(args[0], channel);
       message.channel.send(
         createEmbed("Success", `Address \`${args[0]}\` added successfully!`)
       );
@@ -277,18 +363,19 @@ client.on("messageCreate", async (message) => {
         );
         return;
       }
-      if (!ADDRESSES.includes(args[0])) {
+      const addresses = await listAddresses(channel);
+      if (!addresses || !addresses.includes(args[0])) {
         message.channel.send(
           createEmbed("Error", `Address \`${args[0]}\` not found!`, 0xff0000)
         );
         return;
       }
-      await removeAddress(args[0]);
+      await removeAddress(args[0], channel);
       message.channel.send(
         createEmbed("Success", `Address \`${args[0]}\` removed successfully!`)
       );
     } else if (command === "list") {
-      const addresses = await listAddresses();
+      const addresses = await listAddresses(channel);
       message.channel.send(
         createEmbed(
           "Addresses List",
